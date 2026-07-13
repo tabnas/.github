@@ -1,0 +1,41 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Org-wide Renovate policy for tabnas. Repos extend this with: local>tabnas/.github:renovate-config",
+  "extends": [
+    "config:best-practices",
+    ":semanticCommits",
+    ":dependencyDashboard",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 5,
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Group all internal tabnas package bumps into one PR per repo",
+      "groupName": "tabnas packages",
+      "matchPackageNames": ["@tabnas/**", "github.com/tabnas/**"],
+      "schedule": ["at any time"]
+    },
+    {
+      "description": "Keep GitHub Actions fresh and digest-pinned",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions"
+    },
+    {
+      "description": "Run go mod tidy after Go dep updates",
+      "matchManagers": ["gomod"],
+      "postUpdateOptions": ["gomodTidy"]
+    },
+    {
+      "description": "Never bump Node or Go majors independently — coordinated org-wide instead",
+      "matchPackageNames": ["node", "go", "golang"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "schedule": ["at any time"]
+  }
+}

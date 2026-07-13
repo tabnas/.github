@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a defect in a Tabnas package
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! A minimal reproduction — ideally a failing
+        test case — gets bugs fixed dramatically faster.
+  - type: dropdown
+    id: implementation
+    attributes:
+      label: Implementation
+      description: Which implementation is affected?
+      options:
+        - TypeScript (@tabnas/... on npm)
+        - Go (github.com/tabnas/.../go)
+        - Both
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      placeholder: e.g. 0.2.0
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: >
+        The smallest input + code that shows the problem. For parser bugs,
+        include the exact source text being parsed.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: e.g. Node 24.1 / Go 1.24, Ubuntu 24.04

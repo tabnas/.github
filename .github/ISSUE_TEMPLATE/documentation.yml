@@ -1,0 +1,21 @@
+name: Documentation
+description: Report missing, unclear, or incorrect documentation — or ask a usage question
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Usage questions are welcome here — they often reveal documentation
+        gaps we want to fix.
+  - type: textarea
+    id: issue
+    attributes:
+      label: What's missing or unclear?
+      description: Link the doc/README section if one exists.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement
+      description: If you have wording or an example in mind, put it here.
