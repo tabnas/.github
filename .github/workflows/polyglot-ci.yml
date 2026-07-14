@@ -1,0 +1,150 @@
+# Target: tabnas/.github -> .github/workflows/polyglot-ci.yml
+#
+# Reusable CI for tabnas polyglot repos (ts/ + go/).
+#
+# Callers pass the tabnas sibling repos they depend on; this workflow clones
+# them side by side (the layout local development uses), builds everything in
+# order, and tests this repo's ts/ and go/ trees.
+#
+# Caller example (.github/workflows/ci.yml in each repo):
+#
+#   name: ci
+#   on:
+#     push:        { branches: [ main ] }
+#     pull_request: { branches: [ main ] }
+#   jobs:
+#     ci:
+#       uses: tabnas/.github/.github/workflows/polyglot-ci.yml@main
+#       with:
+#         deps: "parser debug json abnf railroad"
+#
+# `parser` itself inverts the order (it smoke-tests its dependents), so it
+# passes build-order explicitly:
+#
+#       with:
+#         deps: "debug json abnf railroad"
+#         build-order: "parser debug json abnf railroad"
+#
+# Action refs use version tags for readability; Renovate
+# (helpers:pinGitHubActionDigests) pins them to commit SHAs automatically.
+
+name: polyglot-ci
+
+on:
+  workflow_call:
+    inputs:
+      deps:
+        description: >-
+          Space-separated tabnas sibling repos to clone, in topological
+          (dependency-first) order. Empty for repos with no tabnas deps.
+        type: string
+        default: ""
+      build-order:
+        description: >-
+          Space-separated build order for the ts stack, including this repo.
+          Defaults to "<deps> <this repo>".
+        type: string
+        default: ""
+      run-ts:
+        description: Build and test the ts/ tree.
+        type: boolean
+        default: true
+      run-go:
+        description: Build and test the go/ tree.
+        type: boolean
+        default: true
+      node-version:
+        type: string
+        default: "24.x"
+      go-version:
+        type: string
+        default: "1.24"
+
+jobs:
+  ts:
+    if: ${{ inputs.run-ts }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Use LF line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          path: ${{ github.event.repository.name }}
+      - name: Use Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Clone tabnas dependencies
+        shell: bash
+        run: |
+          set -e
+          for dep in ${{ inputs.deps }}; do
+            git clone --depth 1 "https://github.com/tabnas/$dep.git" "$dep"
+          done
+      - name: Build (dependencies, then this repo)
+        shell: bash
+        run: |
+          set -e
+          ORDER="${{ inputs.build-order }}"
+          [ -n "$ORDER" ] || ORDER="${{ inputs.deps }} ${{ github.event.repository.name }}"
+          for pkg in $ORDER; do
+            ( cd "$pkg/ts" && npm i && npm run build --if-present )
+          done
+      - name: Test
+        shell: bash
+        working-directory: ${{ github.event.repository.name }}/ts
+        run: npm test
+
+  go:
+    if: ${{ inputs.run-go }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ${{ github.event.repository.name }}
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+      - name: Clone tabnas dependencies
+        shell: bash
+        run: |
+          set -e
+          for dep in ${{ inputs.deps }}; do
+            git clone --depth 1 "https://github.com/tabnas/$dep.git" "$dep"
+          done
+      # Mirror admin/scripts/link.sh: vendor symlinks for ../vendor/ replaces,
+      # then a go.work over every module EXCEPT those vendor-replaced ones.
+      - name: Set up go workspace
+        shell: bash
+        run: |
+          set -e
+          for gm in $(find . -name go.mod -not -path '*/vendor/*' -not -path '*/node_modules/*'); do
+            while IFS= read -r line; do
+              [ -n "$line" ] || continue
+              v=$(printf '%s' "$line" | sed -E 's#.*\.\./vendor/([^/]+)/go.*#\1#')
+              dep=$(printf '%s' "$line" | awk '{print $2}' | sed -E 's#github.com/tabnas/([^/]+)/go#\1#')
+              repodir=$(dirname "$(dirname "$gm")")
+              mkdir -p "$repodir/vendor"
+              ln -snf "$(cd "$dep" && pwd)" "$repodir/vendor/$v"
+            done < <(grep -E '^[[:space:]]*replace .*=>[[:space:]]*\.\./vendor/' "$gm" || true)
+          done
+          go work init
+          for gm in $(find . -name go.mod -not -path '*/vendor/*' -not -path '*/node_modules/*'); do
+            grep -qE '^[[:space:]]*replace .*=>[[:space:]]*\.\./vendor/' "$gm" && continue
+            go work use "$(dirname "$gm")"
+          done
+      - name: Build
+        working-directory: ${{ github.event.repository.name }}/go
+        run: go build ./...
+      - name: Test
+        working-directory: ${{ github.event.repository.name }}/go
+        run: go test -v ./...
