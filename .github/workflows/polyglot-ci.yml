@@ -91,8 +91,43 @@ jobs:
           set -e
           ORDER="${{ inputs.build-order }}"
           [ -n "$ORDER" ] || ORDER="${{ inputs.deps }} ${{ github.event.repository.name }}"
+          ROOT="$PWD"
+
+          # Point each @tabnas/* dependency at the sibling checkout cloned in
+          # the previous step, replacing the published copy `npm i` installs.
+          #
+          # Without this the clones are dead work. Every package declares its
+          # siblings as "*", so npm resolves them from the registry and the
+          # source we just built is never loaded — meaning no cross-repo
+          # change can be validated before it is released. It is invisible in
+          # the log too: a repo's version is not bumped until release, so the
+          # registry copy and the source copy report the SAME version while
+          # differing in code.
+          #
+          # The go job below already does the equivalent, via `go work use`
+          # over the cloned modules. This is the missing TypeScript half.
+          link_siblings() {
+            pkgdir="$1"
+            for dep in ${{ inputs.deps }}; do
+              [ -f "$ROOT/$dep/ts/package.json" ] || continue
+              name=$(node -p "require('$ROOT/$dep/ts/package.json').name")
+              target="$pkgdir/node_modules/$name"
+              # Only substitute what npm actually installed; do not invent
+              # dependencies a package never declared.
+              { [ -e "$target" ] || [ -L "$target" ]; } || continue
+              rm -rf "$target"
+              mkdir -p "$(dirname "$target")"
+              ln -s "$ROOT/$dep/ts" "$target"
+              echo "linked $name -> $dep/ts (was the published copy)"
+            done
+          }
+
           for pkg in $ORDER; do
-            ( cd "$pkg/ts" && npm i && npm run build --if-present )
+            ( cd "$pkg/ts" && npm i )
+            # Link BEFORE building, so each package compiles against sibling
+            # source rather than the registry.
+            link_siblings "$ROOT/$pkg/ts"
+            ( cd "$pkg/ts" && npm run build --if-present )
           done
       - name: Test
         shell: bash
