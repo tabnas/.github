@@ -110,6 +110,11 @@ jobs:
             pkgdir="$1"
             for dep in ${{ inputs.deps }}; do
               [ -f "$ROOT/$dep/ts/package.json" ] || continue
+              # Never link a package into its own node_modules. A dep also
+              # appears in ORDER, so without this parser links parser and the
+              # copy fallback dies with "cannot copy a directory into itself"
+              # (on unix ln -s quietly made a self-referential link instead).
+              [ "$ROOT/$dep/ts" = "$pkgdir" ] && continue
               # Read the name with a RELATIVE require: on the windows runner
               # $ROOT is an MSYS path (/d/a/repo/repo) which node cannot
               # resolve, and an absolute path here fails with
