@@ -110,15 +110,30 @@ jobs:
             pkgdir="$1"
             for dep in ${{ inputs.deps }}; do
               [ -f "$ROOT/$dep/ts/package.json" ] || continue
-              name=$(node -p "require('$ROOT/$dep/ts/package.json').name")
+              # Read the name with a RELATIVE require: on the windows runner
+              # $ROOT is an MSYS path (/d/a/repo/repo) which node cannot
+              # resolve, and an absolute path here fails with
+              # "Cannot find module".
+              name=$(cd "$ROOT/$dep/ts" && node -p "require('./package.json').name")
+              [ -n "$name" ] || continue
               target="$pkgdir/node_modules/$name"
               # Only substitute what npm actually installed; do not invent
               # dependencies a package never declared.
               { [ -e "$target" ] || [ -L "$target" ]; } || continue
               rm -rf "$target"
               mkdir -p "$(dirname "$target")"
-              ln -s "$ROOT/$dep/ts" "$target"
-              echo "linked $name -> $dep/ts (was the published copy)"
+              # Symlink where the platform allows it. On windows, unprivileged
+              # symlink creation may fail or produce something node will not
+              # follow, so fall back to a copy — the dependency has already
+              # been built by this point in ORDER, so the copy carries dist/.
+              if ! ln -s "$ROOT/$dep/ts" "$target" 2>/dev/null \
+                 || [ ! -f "$target/package.json" ]; then
+                rm -rf "$target"
+                cp -R "$ROOT/$dep/ts" "$target"
+                echo "copied $name <- $dep/ts (symlink unavailable)"
+              else
+                echo "linked $name -> $dep/ts (was the published copy)"
+              fi
             done
           }
 
