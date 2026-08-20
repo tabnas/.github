@@ -1,0 +1,27 @@
+# Target: tabnas/.github -> .github/workflows/notify-status.yml
+#
+# Reusable: pings tabnas/status to rebuild the dashboard when a repo's PR/issue
+# counts change. Called by each repo's thin notify-status.yml caller.
+# Requires the org secret STATUS_DISPATCH_TOKEN (fine-grained PAT with
+# Contents: write on tabnas/status only), passed via `secrets: inherit`.
+
+name: notify-status
+
+on:
+  workflow_call:
+    secrets:
+      STATUS_DISPATCH_TOKEN:
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch org-activity to tabnas/status
+        env:
+          GH_TOKEN: ${{ secrets.STATUS_DISPATCH_TOKEN }}
+        run: |
+          gh api -X POST repos/tabnas/status/dispatches \
+            -f event_type=org-activity \
+            -F "client_payload[repo]=${{ github.repository }}" \
+            -F "client_payload[reason]=${{ github.event_name }}"
