@@ -1,0 +1,95 @@
+# Reusable: late-attach darwin clib artifacts to an EXISTING release.
+# Lives in tabnas/.github/.github/workflows/clib-darwin-attach.yml;
+# called by each format repo's ci/clib-release.yml dispatch path.
+#
+# This is a first-class path, not a workaround (ADR-12 clause 5): the
+# release went out complete for portable targets; macOS availability is
+# a WHEN, not a WHETHER. This job builds the darwin host arch, uploads
+# it, and patches manifest.json in place — idempotently, touching only
+# the darwin entries. The laptop equivalent is documented in the clib
+# README (`./build.sh && gh release upload <tag> dist/*`), plus a
+# manifest edit or a re-run of this dispatch.
+name: clib-darwin-attach
+
+on:
+  workflow_call:
+    inputs:
+      lib:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  attach:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: go/go.mod
+      - name: build darwin host target
+        run: cd go/clib && ./build.sh
+      - name: patch manifest and upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIB: ${{ inputs.lib }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release download "$TAG" --pattern manifest.json --output manifest.json --repo "$GITHUB_REPOSITORY" || echo '{}' > manifest.json
+          python3 - <<'PY'
+          import hashlib, json, os, glob, re, sys
+          lib, tag = os.environ["LIB"], os.environ["TAG"]
+          try:
+              m = json.load(open("manifest.json"))
+          except Exception:
+              m = {}
+          if not m.get("targets"):
+              m = {"schema": 1, "lib": lib, "tag": tag, "targets": {}}
+
+          # Match the target suffix EXACTLY. Never infer an architecture from
+          # the absence of another one.
+          #
+          # This used to read `arch = "arm64" if "arm64" in fname else "amd64"`
+          # over a bare *.dylib glob, and build.sh emits a canonical
+          # lib<name>.dylib SYMLINK beside the suffixed artifact (for the
+          # linker and the pkg-config Libs line). That symlink has no "arm64"
+          # in its basename, so it was classified as amd64 — publishing
+          # darwin/amd64 as PRESENT, pointing at arm64 bytes, with a sha256
+          # that verifies. An Intel consumer would pass its integrity check
+          # and load the wrong architecture. Absent would have been safer
+          # than that, which is the whole argument for not guessing.
+          pat = re.compile(rf"^{re.escape(lib)}-darwin-(arm64|amd64)\.dylib$")
+          found = []
+          for p in sorted(glob.glob("go/clib/dist/*.dylib")):
+              if os.path.islink(p):
+                  continue
+              mt = pat.match(os.path.basename(p))
+              if not mt:
+                  print(f"skip (not a darwin target artifact): {p}")
+                  continue
+              sha = hashlib.sha256(open(p, "rb").read()).hexdigest()
+              m["targets"][f"darwin/{mt.group(1)}"] = {
+                  "file": os.path.basename(p), "sha256": sha, "present": True}
+              found.append(mt.group(1))
+
+          # Attaching nothing while reporting success is the failure this job
+          # exists to make visible, not to hide.
+          if not found:
+              sys.exit("no darwin target artifacts matched "
+                       f"{lib}-darwin-<arch>.dylib — nothing to attach")
+          print("attached:", ", ".join(sorted(found)))
+          json.dump(m, open("manifest.json", "w"), indent=2)
+          PY
+          rm -f go/clib/dist/*.h
+          # Upload the suffixed target artifacts only. The canonical symlink
+          # is a local build convenience; publishing it invites exactly the
+          # mislabelling the classifier above now refuses to do.
+          find go/clib/dist -type f -name "$LIB-darwin-*.dylib" -print0 \
+            | xargs -0 gh release upload "$TAG" manifest.json --clobber --repo "$GITHUB_REPOSITORY"
