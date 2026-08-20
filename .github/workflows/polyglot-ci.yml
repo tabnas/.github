@@ -71,11 +71,11 @@ jobs:
     steps:
       - name: Use LF line endings
         run: git config --global core.autocrlf false
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           path: ${{ github.event.repository.name }}
       - name: Use Node.js ${{ inputs.node-version }}
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
         with:
           node-version: ${{ inputs.node-version }}
       - name: Clone tabnas dependencies
@@ -162,11 +162,11 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           path: ${{ github.event.repository.name }}
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version: ${{ inputs.go-version }}
       - name: Clone tabnas dependencies
@@ -200,6 +200,64 @@ jobs:
       - name: Build
         working-directory: ${{ github.event.repository.name }}/go
         run: go build ./...
+      # The workspace above makes go.mod's declared versions invisible: every
+      # github.com/tabnas/* require resolves to the sibling clone, so a stale or
+      # wrong pin is never exercised and CI structurally cannot see it. That hid
+      # three stale pins at two depths, and one (ebnf) had already shipped
+      # broken to main before anyone noticed. GOWORK=off resolves from go.mod
+      # against the module proxy instead, which is what a consumer of the
+      # published module actually gets.
+      #
+      # Read the error before acting on it — an unpublished pin and a wrong pin
+      # both land here, and either can surface as "unknown revision go/vX.Y.Z"
+      # or as "missing go.sum entry" depending on what go.sum already holds:
+      #   the version is simply not published yet — normal mid-release-wave,
+      #       and the honest reading of a red main straight after a merge that
+      #       adds engine API. Publish the dependency, then re-run.
+      #   the version is published but wrong, or the code no longer compiles
+      #       against it — the defect this step exists to catch. Fix go.mod;
+      #       do not paper over it by leaning on the workspace.
+      - name: Build from go.mod (GOWORK=off — the workspace hides stale pins)
+        shell: bash
+        working-directory: ${{ github.event.repository.name }}
+        env:
+          GOWORK: "off"
+        run: |
+          set -e
+          for gm in $(find go -name go.mod -not -path '*/vendor/*' | sort); do
+            d="$(dirname "$gm")"
+
+            # GOWORK=off turns the workspace off; it does NOT turn a module's
+            # own `replace` off. A committed filesystem replace — the
+            # `=> ../vendor/<dep>` form the workspace step above symlinks to a
+            # sibling clone — would therefore route this build straight back to
+            # that clone, and the step would pass while the declared version
+            # went untested. No repo in the fleet carries one today. If one
+            # appears, fail loudly rather than let a gate quietly stop seeing
+            # what it says it sees.
+            #
+            # A version-to-version replace is fine and is not flagged: it still
+            # resolves through the proxy, so the declared graph is exercised.
+            if go -C "$d" mod edit -json \
+                 | jq -e '[(.Replace // [])[] | select(.New.Path | test("^[./]"))] | length > 0' \
+                 >/dev/null; then
+              echo "::error file=$gm::filesystem replace directive present -" \
+                   "GOWORK=off resolves through it, so this step cannot validate" \
+                   "the declared versions of this module. Extend the step before" \
+                   "committing a local replace."
+              exit 1
+            fi
+
+            echo "==> $d: build"
+            ( cd "$d" && go build ./... )
+
+            # go build never compiles _test.go, so a dependency reachable only
+            # from tests stays unresolved here and is then satisfied by the
+            # workspace in the Test step below — the same blind spot one level
+            # down. -run '^$' builds every test binary and runs no test.
+            echo "==> $d: compile tests"
+            ( cd "$d" && go test -count=1 -run '^$' ./... )
+          done
       - name: Test
         working-directory: ${{ github.event.repository.name }}/go
         run: go test -v ./...
