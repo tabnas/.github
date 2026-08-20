@@ -1,0 +1,126 @@
+# Reusable: build and attach the per-format clib release artifacts.
+# Lives in tabnas/.github/.github/workflows/clib-release.yml; called by
+# each format repo's ci/clib-release.yml (stamped by adopt-clib.sh).
+#
+# TWO LANES (ADR-12 clause 5; strategy note §8):
+#   portable  Linux + zig cross-compiles linux/amd64, linux/arm64,
+#             windows/amd64. GATES the artifact release.
+#   darwin    macos-14, builds the host arch only (darwin/arm64).
+#             Best-effort twice over: an org/repo variable switches the
+#             lane off without editing workflows, and continue-on-error
+#             means a red Mac never reds the release. darwin/amd64 is
+#             not attempted here — attach it late from an Intel Mac or
+#             via the clib-darwin-attach dispatch.
+#
+# The assemble job runs whenever portable succeeded — darwin missing,
+# failed, or disabled — and writes manifest.json recording per-target
+# presence, so absence is explicit data for every binding's loader
+# (schema: parser/schema/clib-artifacts-manifest.schema.json).
+name: clib-release
+
+on:
+  workflow_call:
+    inputs:
+      lib:
+        description: "library base name, e.g. libtabnasjson"
+        required: true
+        type: string
+      tag:
+        description: "release tag to attach artifacts to"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.14.1
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: go/go.mod
+      - name: install zig
+        run: |
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" | tar xJ
+          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+      - name: build portable targets
+        run: cd go/clib && ZIG=zig ./build.sh linux/amd64 linux/arm64 windows/amd64 windows/arm64
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: clib-portable
+          path: go/clib/dist/*
+          if-no-files-found: error
+
+  darwin:
+    runs-on: macos-14
+    if: ${{ vars.TABNAS_DARWIN != 'off' }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: go/go.mod
+      - name: build darwin host target
+        run: cd go/clib && ./build.sh
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: clib-darwin
+          path: go/clib/dist/*
+          if-no-files-found: error
+
+  assemble:
+    needs: [portable, darwin]
+    if: ${{ always() && needs.portable.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: write manifest.json
+        env:
+          LIB: ${{ inputs.lib }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, glob
+          lib, tag = os.environ["LIB"], os.environ["TAG"]
+          targets = {  # target -> expected artifact filename
+            "linux/amd64":   f"{lib}-linux-amd64.so",
+            "linux/arm64":   f"{lib}-linux-arm64.so",
+            "windows/amd64": f"{lib}-windows-amd64.dll",
+            "windows/arm64": f"{lib}-windows-arm64.dll",
+            "darwin/arm64":  f"{lib}-darwin-arm64.dylib",
+            "darwin/amd64":  f"{lib}-darwin-amd64.dylib",
+          }
+          have = {os.path.basename(p): p for p in glob.glob("dist/*")}
+          out = {"schema": 1, "lib": lib, "tag": tag, "targets": {}}
+          for t, fname in targets.items():
+              if fname in have:
+                  sha = hashlib.sha256(open(have[fname], "rb").read()).hexdigest()
+                  out["targets"][t] = {"file": fname, "sha256": sha, "present": True}
+              else:
+                  out["targets"][t] = {"file": fname, "present": False}
+          json.dump(out, open("dist/manifest.json", "w"), indent=2)
+          print(json.dumps(out, indent=2))
+          PY
+      - name: attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          # Headers (*.h) from c-shared builds are build byproducts, not
+          # deliverables — the canonical header ships in the repo.
+          rm -f dist/*.h
+          gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
