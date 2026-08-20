@@ -1,0 +1,52 @@
+# Target: tabnas/.github -> .github/workflows/scorecard.yml
+#
+# Reusable OpenSSF Scorecard analysis for tabnas repos.
+# Measures security posture (branch protection, pinned actions, SECURITY.md,
+# dangerous-workflow patterns, etc.) and publishes results to the public
+# OpenSSF API so each repo can show a score badge.
+#
+# Callers hold the triggers + permissions (Scorecard needs branch_protection_rule
+# and a weekly schedule); see the ci/scorecard.yml caller in each repo.
+# Action refs use tags for readability; Renovate pins them to SHAs.
+
+name: scorecard
+
+on:
+  workflow_call:
+    inputs:
+      publish_results:
+        description: Publish results to the OpenSSF API (enables the badge).
+        type: boolean
+        default: true
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # upload SARIF to code scanning
+      id-token: write          # publish_results provenance
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Run analysis
+        uses: ossf/scorecard-action@55891bbd73f2425e97637d96e306fc9d491d0b21  # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: ${{ inputs.publish_results }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@faaa5d804fc648d0fdb28822a8e36cf7d0a6132c  # v4.37.7
+        with:
+          sarif_file: results.sarif
