@@ -10,18 +10,37 @@ name: notify-status
 on:
   workflow_call:
     secrets:
+      # required: false, deliberately. A `required: true` secret that is not
+      # configured fails at EVALUATION time — before any job starts, with no
+      # logs — so every PR and issue across thirty repos got a red check
+      # because a DASHBOARD PING had no token. That is a gate failing on
+      # something it does not measure.
+      #
+      # The dashboard is a convenience; a repo without the token should not
+      # be told its pull request is broken. The step below skips when the
+      # secret is absent and says so in the log, so the missing token is
+      # visible without being fatal.
       STATUS_DISPATCH_TOKEN:
-        required: true
+        required: false
 
 jobs:
   notify:
     runs-on: ubuntu-latest
+    # Mapped to env at job level: the `secrets` context is not usable in a
+    # step `if`, but `env` is, and this is the standard way to make a secret
+    # testable without exposing it.
+    env:
+      GH_TOKEN: ${{ secrets.STATUS_DISPATCH_TOKEN }}
     steps:
       - name: Dispatch org-activity to tabnas/status
-        env:
-          GH_TOKEN: ${{ secrets.STATUS_DISPATCH_TOKEN }}
+        if: ${{ '' != env.GH_TOKEN }}
         run: |
           gh api -X POST repos/tabnas/status/dispatches \
             -f event_type=org-activity \
             -F "client_payload[repo]=${{ github.repository }}" \
             -F "client_payload[reason]=${{ github.event_name }}"
+      - name: Note that the dashboard ping was skipped
+        if: ${{ '' == env.GH_TOKEN }}
+        run: |
+          echo "STATUS_DISPATCH_TOKEN is not configured for this repository."
+          echo "The tabnas/status dashboard was not pinged. Nothing else is affected."
