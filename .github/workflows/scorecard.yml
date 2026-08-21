@@ -19,7 +19,21 @@ on:
         type: boolean
         default: true
 
-permissions: read-all
+# NO top-level permissions here, deliberately. GitHub's rule for a called
+# workflow is that permissions "can only be maintained or reduced -- not
+# elevated -- throughout the chain". A top-level `permissions: read-all`
+# REDUCES the chain to read, and the analysis job below then asks for
+# security-events: write, which is an elevation above what this file just
+# gave away. GitHub rejects that before any job starts, which is why every
+# caller in the fleet failed identically with startup_failure and an
+# unhelpful "workflow file issue".
+#
+# The OpenSSF starter template carries `permissions: read-all` at the top and
+# is correct STANDALONE, where top-level permissions are a default that a job
+# may elevate above. Copying it verbatim into a reusable workflow is what
+# broke it: the same three lines mean 'default' in one context and 'ceiling'
+# in the other. The job keeps its own least-privilege block below; the caller
+# grants exactly those three, so the chain is maintained, never elevated.
 
 jobs:
   analysis:
