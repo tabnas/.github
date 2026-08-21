@@ -228,23 +228,39 @@ jobs:
             d="$(dirname "$gm")"
 
             # GOWORK=off turns the workspace off; it does NOT turn a module's
-            # own `replace` off. A committed filesystem replace — the
-            # `=> ../vendor/<dep>` form the workspace step above symlinks to a
-            # sibling clone — would therefore route this build straight back to
-            # that clone, and the step would pass while the declared version
-            # went untested. No repo in the fleet carries one today. If one
-            # appears, fail loudly rather than let a gate quietly stop seeing
-            # what it says it sees.
+            # own `replace` off. A replace into `../vendor/<dep>` — the form the
+            # workspace step above symlinks to a sibling clone — would therefore
+            # route this build straight back to that clone, and the step would
+            # pass while the declared version went untested. That is the one
+            # form this gate refuses: fail loudly rather than let a gate quietly
+            # stop seeing what it says it sees.
+            #
+            # It is scoped to that form deliberately. This check once refused
+            # ANY path-shaped replace, on the stated grounds that "no repo in
+            # the fleet carries one today" — which was false the day it shipped.
+            # support/go/adder and json/go/debugtest both did, and both are
+            # nested test-harness modules whose replaces are the point: adder
+            # replaces support with `../` so the suite exercises the working
+            # tree rather than the published version, and debugtest reaches the
+            # sibling debug/parser clones the `deps:` input already checks out.
+            # Neither can drop its replace, so a blanket refusal turned two
+            # repos red for a condition this gate was never designed to catch.
+            #
+            # Scoping it back does not cost coverage here: both modules build
+            # and compile their tests under GOWORK=off, so every require they
+            # do NOT replace is still resolved through the proxy — adder's
+            # `parser/go` pin is fetched and exercised on every run, which the
+            # blanket check prevented by aborting first.
             #
             # A version-to-version replace is fine and is not flagged: it still
             # resolves through the proxy, so the declared graph is exercised.
             if go -C "$d" mod edit -json \
-                 | jq -e '[(.Replace // [])[] | select(.New.Path | test("^[./]"))] | length > 0' \
+                 | jq -e '[(.Replace // [])[] | select(.New.Path | test("(^|/)vendor/"))] | length > 0' \
                  >/dev/null; then
-              echo "::error file=$gm::filesystem replace directive present -" \
-                   "GOWORK=off resolves through it, so this step cannot validate" \
-                   "the declared versions of this module. Extend the step before" \
-                   "committing a local replace."
+              echo "::error file=$gm::vendor replace directive present -" \
+                   "GOWORK=off resolves through it to a sibling clone, so this" \
+                   "step cannot validate the declared versions of this module." \
+                   "Extend the step before committing a vendor replace."
               exit 1
             fi
 
@@ -258,6 +274,25 @@ jobs:
             echo "==> $d: compile tests"
             ( cd "$d" && go test -count=1 -run '^$' ./... )
           done
+      # `go test ./...` does not cross a module boundary, so a NESTED module
+      # under go/ never ran here — and a test that quietly does not run reports
+      # a green tick that is a lie. support/go/adder hit exactly this and worked
+      # around it with a bespoke `go-adder` job, whose comment says the fix
+      # belongs upstream "if a second one appears". json/go/debugtest is that
+      # second one: its suite had never run in CI at all, and its go.mod had
+      # drifted out of tidy unnoticed as a direct result.
+      #
+      # Enumerated the same way the GOWORK=off step above enumerates, so the
+      # two steps cannot disagree about what a module is. Fleet-wide this walks
+      # exactly two nested modules (adder, debugtest); every other repo has one
+      # go.mod under go/ and is unaffected.
       - name: Test
-        working-directory: ${{ github.event.repository.name }}/go
-        run: go test -v ./...
+        shell: bash
+        working-directory: ${{ github.event.repository.name }}
+        run: |
+          set -e
+          for gm in $(find go -name go.mod -not -path '*/vendor/*' | sort); do
+            d="$(dirname "$gm")"
+            echo "==> $d: test"
+            ( cd "$d" && go test -v ./... )
+          done
