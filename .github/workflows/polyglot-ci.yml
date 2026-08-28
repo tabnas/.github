@@ -131,13 +131,24 @@ jobs:
               # symlink creation may fail or produce something node will not
               # follow, so fall back to a copy — the dependency has already
               # been built by this point in ORDER, so the copy carries dist/.
+              #
+              # Either outcome builds correctly, so this is not a failure. But
+              # SAY WHICH ONE HAPPENED: under MSYS `ln -s` copies the tree and
+              # still exits 0, so a successful ln does not mean a link exists,
+              # and the log used to claim "linked" over an ordinary directory.
+              # Anything asking "is this the sibling?" cannot answer it with
+              # lstat on windows — see the enginepin guard in json/support,
+              # which read the copy as a registry install and failed on a
+              # version skew that was never real.
               if ! ln -s "$ROOT/$dep/ts" "$target" 2>/dev/null \
                  || [ ! -f "$target/package.json" ]; then
                 rm -rf "$target"
                 cp -R "$ROOT/$dep/ts" "$target"
                 echo "copied $name <- $dep/ts (symlink unavailable)"
-              else
+              elif [ -L "$target" ]; then
                 echo "linked $name -> $dep/ts (was the published copy)"
+              else
+                echo "copied $name <- $dep/ts (ln -s produced a copy)"
               fi
             done
           }
