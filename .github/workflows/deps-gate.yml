@@ -1,0 +1,365 @@
+# Target: tabnas/.github -> .github/workflows/deps-gate.yml
+#
+# Every dependency must resolve to a PUBLISHED version.
+#
+# A `file:`, `link:` or `portal:` specifier points at a working tree, so the
+# build depends on what is checked out beside it: CI tests the sibling rather
+# than the package a consumer installs, and the gap only surfaces after a
+# release. Such a link is a local development convenience; committing one is
+# the bug this gate catches.
+#
+# NPM ONLY, DELIBERATELY. Cargo path deps and go.mod `replace` directives are
+# not scanned and must not be: the Rust crates (tabnas, tabnas-support, ...)
+# are not on crates.io, so `path = "../../parser/rs"` is the only resolution
+# that exists, and the Go replaces belong to the test and bench harnesses that
+# polyglot-ci accommodates on purpose. A gate that rejected those would fail
+# every Rust crate in the fleet with no published alternative to move to.
+#
+# Not folded into polyglot-ci.yml: five repos carrying a package.json do not
+# call it (lsp, measure, skills, status, web) -- and lsp was one of the two
+# repos actually in violation when this gate was written. A gate that cannot
+# see the violator is not a gate.
+#
+# It READS MANIFESTS AND LOCKFILES, NEVER INSTALLS: package.json,
+# package-lock.json and npm-shrinkwrap.json, as committed. A lockfile is what
+# npm installs from and it outlives a manifest edit, so it is read too; running
+# npm would mean running the dependency lifecycle scripts of the tree being
+# audited.
+#
+# This is the org-wide FLOOR, not the only gate. tabnas/parser carries a
+# stricter per-repo arm, tools/dep-gate.cjs (run by its `make test` and
+# `npm test`), which judges the git index rather than the checkout and also
+# rejects workspace:/catalog: specifiers, archives, non-GitHub git, foreign
+# registries, escaping symlinks, and Go/Cargo paths outside the repo.
+# A repo may be stricter than this floor; it may not be looser. Everything this
+# gate rejects, parser's rejects too -- checked finding for finding on the
+# fixtures behind the ADR-18 amendment -- so keep it that way when changing
+# either.
+#
+# The check is inline rather than a script in this repo: one copy, no second
+# place to drift, and nothing for a caller to check out.
+
+name: deps-gate
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  deps-gate:
+    name: dependencies name published versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 24.x
+
+      # No install: this reads manifests and lockfiles, it does not resolve
+      # them. Running npm here would mean running the dependency lifecycle
+      # scripts of the very tree being audited.
+      - name: Check every package.json and npm lockfile
+        run: |
+          cat > /tmp/deps-gate.js <<'GATE'
+          // Every dependency must resolve to a PUBLISHED version. A `file:`, `link:` or
+          // `portal:` specifier points at a working tree, so it makes the build depend
+          // on the machine it runs on: CI then tests the checkout beside it rather than
+          // the package a consumer would install, and the difference only surfaces after
+          // release. Such a link is a local development convenience; committing one is
+          // the bug this gate catches.
+          //
+          // npm ONLY. Cargo path deps and go.mod replace directives are deliberate here
+          // and are NOT scanned: the Rust crates (tabnas, tabnas-support, ...) are not
+          // on crates.io, so a path dep is the only resolution that exists, and the Go
+          // replaces belong to test and bench harnesses that polyglot-ci accommodates on
+          // purpose.
+          //
+          // It walks the CHECKOUT, not the index. In CI that is the same thing
+          // -- actions/checkout gives a clean tree -- but run it on a working
+          // copy with siblings installed and it will report the untracked
+          // package-lock.json npm just wrote. That is a true finding about
+          // that tree and not about the commit, so read it accordingly.
+          const Fs = require('node:fs')
+          const Path = require('node:path')
+
+          const SECTIONS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
+
+          // The three protocol prefixes are the SAVED form; they are not the
+          // only accepted one. npm documents `../foo`, `./foo`, `~/foo` and
+          // `/foo` as local paths too, and normalizes them to `file:` only
+          // when IT writes the manifest -- a hand-authored or generated one
+          // keeps the raw form, installs from the working tree, and used to
+          // pass this gate.
+          //
+          // `git+file:` is a local source too: a git repository on this
+          // machine's disk, which npm clones at install time. It is never
+          // exempt, wherever it points, because a checkout carries no git
+          // repository it could name.
+          const LOCAL = /^(file:|link:|portal:|git\+file:)|^(\.{1,2}[\/\\]|~[\/\\]|[\/\\])/
+          const GITFILE = /^git\+file:/
+
+          // npm's own test for "this file: target is an archive" (the
+          // isFileType regex in npm-package-arg). Any other file: target is a
+          // DIRECTORY, whether npm links it or, under install-links=true,
+          // packs it -- and a directory is only legitimate as a workspace.
+          const ARCHIVE = /[.](?:tgz|tar[.]gz|tar)$/i
+
+          const LOCKS = ['package-lock.json', 'npm-shrinkwrap.json']
+
+          function files(dir, want, out = []) {
+            for (const e of Fs.readdirSync(dir, { withFileTypes: true })) {
+              if (e.name === 'node_modules' || e.name === '.git') continue
+              const p = Path.join(dir, e.name)
+              if (e.isDirectory()) files(p, want, out)
+              else if (want.includes(e.name)) out.push(p)
+            }
+            return out
+          }
+
+          const manifests = (dir) => files(dir, ['package.json'])
+
+          // `overrides` replaces a package ANYWHERE in the tree, including a
+          // transitive one, and nests arbitrarily: a value is either a
+          // specifier or an object of further overrides, which may carry a
+          // "." key for the package at that level. So it is walked rather
+          // than read one level deep. pnpm keeps its equivalent under
+          // `pnpm.overrides`, flat, and Yarn under `resolutions`, flat, keyed
+          // by a name or a `**/name` path -- all three are walked.
+          function walkOverrides(node, path, hit) {
+            if (null == node) return
+            if (typeof node === 'string') {
+              if (LOCAL.test(node)) hit(path, node)
+              return
+            }
+            if (typeof node !== 'object' || Array.isArray(node)) return
+            for (const [k, v] of Object.entries(node)) {
+              walkOverrides(v, k === '.' ? path : (path ? path + '.' + k : k), hit)
+            }
+          }
+
+          // A workspace is a package the root manifest DECLARES, in its
+          // `workspaces` field -- not every directory that happens to sit
+          // inside the checkout. An `app/` linked to an ordinary sibling
+          // `dep/`, both committed, is a stale local link and not a
+          // workspace, and exempting it by position alone let exactly that
+          // through: `npm ci` recreated the symlink while the gate reported
+          // clean.
+          //
+          // npm accepts the field as an array of globs or as
+          // `{ packages: [...] }`. An entry with an odd number of leading `!`
+          // EXCLUDES, and exclusions apply after inclusions: dropping them
+          // left `packages/*` matching the very `!packages/dep` it was told
+          // to skip. As in npm (@npmcli/map-workspaces), a later inclusion
+          // cancels an earlier exclusion that matches it, and a leading `/`
+          // or `./` is ignored. `*`, `**` and `?` are honoured, `?` as one
+          // character other than `/`; anything more exotic (classes, braces)
+          // is taken literally, so it reads as "not a member" and is
+          // reported, which is the safe direction for a gate.
+          //
+          // pnpm declares its members in `pnpm-workspace.yaml` instead. Rather
+          // than parse YAML, its presence restores the old positional rule for
+          // that checkout: any in-repo link is taken as a workspace link. That
+          // is deliberately weaker than the npm path and is the reason this
+          // says so out loud.
+          function globToRe(pattern) {
+            const esc = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+            return new RegExp('^' + esc
+              .replace(/\*\*/g, '\u0000')
+              .replace(/\*/g, '[^/]*')
+              .replace(/\?/g, '[^/]')
+              .replace(/\u0000/g, '.*') + '$')
+          }
+
+          function workspaceMembers(dir) {
+            let decl = []
+            try {
+              const pkg = JSON.parse(Fs.readFileSync(Path.join(dir, 'package.json'), 'utf8'))
+              const w = pkg.workspaces
+              decl = Array.isArray(w) ? w : (w && Array.isArray(w.packages) ? w.packages : [])
+            } catch (e) { decl = [] }
+            const pnpm = Fs.existsSync(Path.join(dir, 'pnpm-workspace.yaml'))
+              || Fs.existsSync(Path.join(dir, 'pnpm-workspace.yml'))
+            const include = []
+            const exclude = []
+            for (const g of decl) {
+              if (typeof g !== 'string') continue
+              const bangs = g.match(/^!*/)[0].length
+              const pat = g.slice(bangs).replace(/^\.?\/+/, '').replace(/\/+$/, '')
+              if (bangs % 2 === 1) { exclude.push(pat); continue }
+              for (let i = exclude.length - 1; i >= 0; i--) {
+                if (globToRe(exclude[i]).test(pat)) exclude.splice(i, 1)
+              }
+              include.push(pat)
+            }
+            const inc = include.map(globToRe)
+            const exc = exclude.map(globToRe)
+            return (target) => {
+              if (pnpm) return true
+              if (!target) return false
+              const rel = Path.relative(dir, Path.resolve(dir, String(target).replace(/^file:/, '')))
+                .split(Path.sep).join('/')
+              if (rel === '' || rel.startsWith('..')) return false
+              return inc.some((re) => re.test(rel)) && !exc.some((re) => re.test(rel))
+            }
+          }
+
+          // A lockfile is what npm actually installs from, and it outlives a
+          // manifest edit: change `file:../child` to `^1.0.0` without
+          // regenerating, and both `npm install` and `npm ci` keep the
+          // lockfile's linked entry. A gate that reads only package.json
+          // reports clean while the build still resolves to the working tree.
+          //
+          // v3 records links as `link: true` on a packages[] entry, with the
+          // target in `resolved`; v1 records them as a `version` that is a
+          // file: specifier. Both shapes are read, and a lockfile may carry
+          // both.
+          //
+          // `link: true` is not the only local source. A local TARBALL is a
+          // v2/v3 entry with `resolved: "file:../dep.tgz"` and no `link`, and
+          // npm installs it from that path just as faithfully -- so the
+          // `resolved` specifier is tested too, and skipping every non-link
+          // entry used to let a manifest repaired to `^1.0.0` still install
+          // an unpublished local artifact.
+          //
+          // Every local source is judged by ONE rule, whichever lockfile
+          // shape records it, because what matters is what the target IS,
+          // not how the entry spells it:
+          //
+          // - `git+file:` is never exempt (see LOCAL);
+          // - a target outside the repository is never exempt, and "outside"
+          //   is where the path LANDS: a committed symlink can carry an
+          //   in-repo path out of the checkout, so an existing target is
+          //   resolved through the filesystem before it is contained;
+          // - an ARCHIVE inside the repository is exempt by position, because
+          //   a committed tarball travels with the checkout and installs the
+          //   same way everywhere;
+          // - anything else is a DIRECTORY, and a directory is exempt only
+          //   when it is a declared workspace member (above). That holds for
+          //   a v3 `link: true`, for a v1 `version: "file:dep"`, and for a
+          //   directory npm PACKED rather than linked under
+          //   install-links=true, which is recorded as a non-link
+          //   `resolved: "file:../dep"` -- all three are the stale wiring
+          //   this gate exists for, and the tarball exemption used to let
+          //   the last two through.
+          const inside = (base, p) => {
+            const rel = Path.relative(base, p)
+            return !(rel === '..' || rel.startsWith('..' + Path.sep) || Path.isAbsolute(rel))
+          }
+          const realpath = (p) => { try { return Fs.realpathSync(p) } catch (e) { return null } }
+
+          function lockLinks(lockPath, root) {
+            const out = []
+            let lock
+            try { lock = JSON.parse(Fs.readFileSync(lockPath, 'utf8')) } catch (e) {
+              console.error(`deps-gate: cannot parse ${lockPath}: ${e.message}`)
+              process.exitCode = 1
+              return out
+            }
+            const here = Path.dirname(lockPath)
+            const top = Path.resolve(root)
+            const realTop = realpath(top) || top
+            const escapes = (target) => {
+              if (!target) return true
+              const abs = Path.resolve(here, String(target).replace(/^file:/, ''))
+              if (!inside(top, abs)) return true
+              // An absent target is judged by its path; there is nothing to follow.
+              const real = realpath(abs)
+              return null !== real && !inside(realTop, real)
+            }
+            const member = workspaceMembers(here)
+            const exempt = (spec, linked) => {
+              if (GITFILE.test(String(spec))) return false
+              if (escapes(spec)) return false
+              if (!linked && ARCHIVE.test(String(spec).replace(/[?#].*$/, ''))) return true
+              return member(spec)
+            }
+            for (const [where, entry] of Object.entries(lock.packages || {})) {
+              if (!entry) continue
+              const linked = true === entry.link
+              const local = linked
+                || (typeof entry.resolved === 'string' && LOCAL.test(entry.resolved))
+              if (!local || exempt(entry.resolved, linked)) continue
+              out.push({ where: where || '<root>', spec: entry.resolved || 'link: true' })
+            }
+            const v1 = (deps, prefix) => {
+              for (const [name, entry] of Object.entries(deps || {})) {
+                if (entry && typeof entry.version === 'string' && LOCAL.test(entry.version)
+                    && !exempt(entry.version, false)) {
+                  out.push({ where: prefix + name, spec: entry.version })
+                }
+                if (entry && entry.dependencies) v1(entry.dependencies, prefix + name + '/')
+              }
+            }
+            v1(lock.dependencies, '')
+            return out
+          }
+
+          const root = process.argv[2] || '.'
+          const bad = []
+          for (const m of manifests(root)) {
+            let pkg
+            // A manifest that does not parse is a different failure with its own
+            // message; this gate reports what it can read and does not claim the
+            // unreadable one is clean.
+            try { pkg = JSON.parse(Fs.readFileSync(m, 'utf8')) } catch (e) {
+              console.error(`deps-gate: cannot parse ${m}: ${e.message}`)
+              process.exitCode = 1
+              continue
+            }
+            const rel = Path.relative(root, m) || m
+            for (const s of SECTIONS) {
+              for (const [name, spec] of Object.entries(pkg[s] || {})) {
+                if (typeof spec === 'string' && LOCAL.test(spec)) {
+                  bad.push({ file: rel, section: s, name, spec })
+                }
+              }
+            }
+            walkOverrides(pkg.overrides, '', (name, spec) =>
+              bad.push({ file: rel, section: 'overrides', name, spec }))
+            walkOverrides(pkg.pnpm && pkg.pnpm.overrides, '', (name, spec) =>
+              bad.push({ file: rel, section: 'pnpm.overrides', name, spec }))
+            walkOverrides(pkg.resolutions, '', (name, spec) =>
+              bad.push({ file: rel, section: 'resolutions', name, spec }))
+          }
+
+          for (const l of files(root, LOCKS)) {
+            // npm installs from npm-shrinkwrap.json and IGNORES a
+            // package-lock.json beside it, so that one is not what this
+            // directory installs from and judging it would fail a tree npm
+            // installs cleanly.
+            if (Path.basename(l) === 'package-lock.json'
+                && Fs.existsSync(Path.join(Path.dirname(l), 'npm-shrinkwrap.json'))) continue
+            for (const link of lockLinks(l, root)) {
+              bad.push({
+                file: Path.relative(root, l) || l,
+                section: 'lockfile',
+                name: link.where,
+                spec: link.spec,
+              })
+            }
+          }
+
+          if (bad.length === 0) {
+            // Not "clean" if a manifest could not be read: an unparsed file was never
+            // checked, and saying otherwise would report a gap as a pass.
+            if (process.exitCode) {
+              console.error('deps-gate: FAILED — a manifest could not be read (above); nothing else was flagged')
+              process.exit(1)
+            }
+            console.log('deps-gate: clean — every dependency names a published version')
+            process.exit(0)
+          }
+          console.error(`deps-gate: ${bad.length} local link(s) committed:\n`)
+          for (const b of bad) console.error(`  ${b.file}  ${b.section}.${b.name} = "${b.spec}"`)
+          console.error('\nReplace each with the published version range. If the package is')
+          console.error('not published yet, publish it first — that is what the gate is for.')
+          console.error('A lockfile finding needs the lockfile regenerated as well: editing')
+          console.error('the manifest alone leaves npm installing the link it records.')
+          process.exit(1)
+          GATE
+          node /tmp/deps-gate.js .
