@@ -1,6 +1,7 @@
 # Reusable: build and attach the per-format clib release artifacts.
 # Lives in tabnas/.github/.github/workflows/clib-release.yml; called by
-# each format repo's ci/clib-release.yml (stamped by adopt-clib.sh).
+# each COMPONENT repo's .github/workflows/clib-release.yml (stamped by
+# adopt-clib.sh).
 #
 # TWO LANES (ADR-12 clause 5; strategy note §8):
 #   portable  Linux + zig cross-compiles linux/amd64, linux/arm64,
@@ -34,16 +35,16 @@ permissions:
   contents: read
 
 env:
-  ZIG_VERSION: 0.14.1
+  ZIG_VERSION: 0.16.0
 
 jobs:
   portable:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ inputs.tag }}
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go/go.mod
       - name: install zig
@@ -52,7 +53,7 @@ jobs:
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
       - name: build portable targets
         run: cd go/clib && ZIG=zig ./build.sh linux/amd64 linux/arm64 windows/amd64 windows/arm64
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: clib-portable
           path: go/clib/dist/*
@@ -63,15 +64,15 @@ jobs:
     if: ${{ vars.TABNAS_DARWIN != 'off' }}
     continue-on-error: true
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ inputs.tag }}
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go/go.mod
       - name: build darwin host target
         run: cd go/clib && ./build.sh
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: clib-darwin
           path: go/clib/dist/*
@@ -84,7 +85,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           path: dist
           merge-multiple: true
@@ -120,7 +121,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         run: |
-          # Headers (*.h) from c-shared builds are build byproducts, not
-          # deliverables — the canonical header ships in the repo.
-          rm -f dist/*.h
-          gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          # Upload exactly what manifest.json lists, and nothing else. dist/
+          # also holds c-shared headers (build byproducts; the canonical
+          # header ships in the repo) and build.sh's unsuffixed lib<name>.so
+          # and .dylib convenience symlinks, which upload-artifact turns into
+          # full copies. Globbing dist/* published those as assets no
+          # manifest names: a second, unlabelled copy of one architecture,
+          # the ambiguity clib-darwin-attach already refuses to create.
+          python3 - <<'PY' > upload.txt
+          import json
+          m = json.load(open("dist/manifest.json"))
+          print("dist/manifest.json")
+          for t in m["targets"].values():
+              if t["present"]:
+                  print("dist/" + t["file"])
+          PY
+          cat upload.txt
+          xargs gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY" < upload.txt
