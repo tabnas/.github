@@ -16,7 +16,8 @@ Thanks for using Tabnas!
 
 1. Check the repository README and existing issues (including closed ones).
 2. Note the package version and which implementation you're using —
-   TypeScript (`@tabnas/*`) or Go (`github.com/tabnas/*/go`).
+   TypeScript (`@tabnas/*`), Go (`github.com/tabnas/*/go`) or Rust
+   (`tabnas-*` on crates.io).
 3. A minimal reproduction (ideally a failing test case) gets issues fixed
    dramatically faster.
 

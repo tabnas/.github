@@ -9,11 +9,13 @@
 # the bug this gate catches.
 #
 # NPM ONLY, DELIBERATELY. Cargo path deps and go.mod `replace` directives are
-# not scanned and must not be: the Rust crates (tabnas, tabnas-support, ...)
-# are not on crates.io, so `path = "../../parser/rs"` is the only resolution
-# that exists, and the Go replaces belong to the test and bench harnesses that
-# polyglot-ci accommodates on purpose. A gate that rejected those would fail
-# every Rust crate in the fleet with no published alternative to move to.
+# not scanned and must not be: the Rust crates (tabnas-parser, tabnas-support,
+# ...) are on crates.io, but every committed rs/Cargo.toml stays path-only on
+# purpose (admin ADR-21; crates-release.yml swaps in crates.io versions only
+# when it publishes), so `path = "../../parser/rs"` is the resolution a
+# checkout uses, and the Go replaces belong to the test and bench harnesses
+# that polyglot-ci accommodates on purpose. A gate that rejected those would
+# fail every Rust crate in the fleet, whose manifests are path-only by design.
 #
 # Not folded into polyglot-ci.yml: five repos carrying a package.json do not
 # call it (lsp, measure, skills, status, web) -- and lsp was one of the two
@@ -74,8 +76,9 @@ jobs:
           // the bug this gate catches.
           //
           // npm ONLY. Cargo path deps and go.mod replace directives are deliberate here
-          // and are NOT scanned: the Rust crates (tabnas, tabnas-support, ...) are not
-          // on crates.io, so a path dep is the only resolution that exists, and the Go
+          // and are NOT scanned: the Rust crates (tabnas-parser, tabnas-support, ...) are
+          // on crates.io, but the committed manifests stay path-only on purpose (admin
+          // ADR-21), so a path dep is the resolution a checkout uses, and the Go
           // replaces belong to test and bench harnesses that polyglot-ci accommodates on
           // purpose.
           //

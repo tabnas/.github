@@ -1,11 +1,12 @@
 # Tabnas
 
-**One parsing engine, many formats — in TypeScript and Go.**
+**One parsing engine, many formats — in TypeScript, Go and Rust.**
 
 Tabnas is a grammar-driven parsing ecosystem. A single engine
 ([`parser`](https://github.com/tabnas/parser)) powers a family of format
-parsers, each shipped as a matched pair of implementations: an npm package
-(`@tabnas/*`) and a Go module (`github.com/tabnas/<repo>/go`).
+parsers, each shipped as three matched implementations: an npm package
+(`@tabnas/*`), a Go module (`github.com/tabnas/<repo>/go`) and a Rust crate
+(`tabnas-<repo>` on crates.io).
 
 ## Ecosystem
 
@@ -55,6 +56,9 @@ npm install @tabnas/json
 
 # Go
 go get github.com/tabnas/json/go
+
+# Rust
+cargo add tabnas-json
 ```
 
 ## Project health

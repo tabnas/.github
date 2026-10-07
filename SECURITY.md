@@ -17,9 +17,9 @@ Report vulnerabilities privately, either:
 
 Please include:
 
-- the affected package(s) and version(s), and whether the TypeScript
-  (`@tabnas/*`) or Go (`github.com/tabnas/*/go`) implementation is affected
-  (or both);
+- the affected package(s) and version(s), and which implementation is
+  affected: TypeScript (`@tabnas/*`), Go (`github.com/tabnas/*/go`) or Rust
+  (`tabnas-*` on crates.io), or more than one;
 - a description of the issue and its impact;
 - a proof of concept or reproduction steps if possible.
 
