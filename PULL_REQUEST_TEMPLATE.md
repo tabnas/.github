@@ -12,16 +12,17 @@ Closes #
 
 ## Implementations
 
-Tabnas packages ship parallel TypeScript and Go implementations
-(`ts/` is canonical; `go/` tracks it).
+Tabnas packages ship parallel TypeScript, Go and Rust implementations
+(`ts/` is canonical; `go/` and `rs/` track it).
 
 - [ ] `ts/` updated (or not applicable — explain below)
 - [ ] `go/` updated (or not applicable — explain below)
+- [ ] `rs/` updated (or not applicable — explain below)
 
 ## Checklist
 
 - [ ] Tests added/updated for the change
-- [ ] `make test` passes locally (both stacks)
+- [ ] `make test` passes locally (all three stacks)
 - [ ] PR title follows Conventional Commits
 - [ ] Breaking change? Marked with `!` and described below
 
