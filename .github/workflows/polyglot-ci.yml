@@ -59,6 +59,13 @@ on:
       go-version:
         type: string
         default: "1.24"
+      skip-released:
+        description: >-
+          Take a dependency from the npm registry, not its clone, when its
+          ts/ is what its latest release was built from (see the Build step).
+          False builds every dependency from source.
+        type: boolean
+        default: true
 
 jobs:
   ts:
@@ -82,19 +89,110 @@ jobs:
         shell: bash
         run: |
           set -e
+          # Three tries a sibling, 15 s and then 30 s apart. A runner's
+          # connection to github.com drops now and then, and one dropped
+          # clone used to fail the whole job before any test ran:
+          # tabnas/css#69's macOS job did, twice, with "Failed to connect to
+          # github.com port 443 after 75004 ms". A repo that does not exist
+          # fails all three, and the job with it.
           for dep in ${{ inputs.deps }}; do
-            git clone --depth 1 "https://github.com/tabnas/$dep.git" "$dep"
+            for try in 1 2 3; do
+              if git clone --depth 1 "https://github.com/tabnas/$dep.git" "$dep"; then
+                break
+              fi
+              rm -rf "$dep"
+              if [ "$try" = 3 ]; then
+                echo "::error::could not clone tabnas/$dep in 3 tries"
+                exit 1
+              fi
+              echo "clone of tabnas/$dep failed (try $try of 3); trying again in $((try * 15)) s"
+              sleep $((try * 15))
+            done
           done
       - name: Build (dependencies, then this repo)
         shell: bash
+        env:
+          SKIP_RELEASED: ${{ inputs.skip-released }}
         run: |
           set -e
           ORDER="${{ inputs.build-order }}"
           [ -n "$ORDER" ] || ORDER="${{ inputs.deps }} ${{ github.event.repository.name }}"
           ROOT="$PWD"
+          SELF="${{ github.event.repository.name }}"
 
-          # Point each @tabnas/* dependency at the sibling checkout cloned in
-          # the previous step, replacing the published copy `npm i` installs.
+          # Read a package's name with a RELATIVE require: on the windows
+          # runner $ROOT is an MSYS path (/d/a/repo/repo) which node cannot
+          # resolve, and an absolute path here fails with "Cannot find module".
+          pkg_name() { (cd "$ROOT/$1/ts" && node -p "require('./package.json').name"); }
+
+          # FROM SOURCE OR FROM THE REGISTRY. A dependency comes from the npm
+          # registry, as `npm i` installs it, when building it here would
+          # build what its latest release already published:
+          #
+          #   - its ts/ is the ts/ of the commit npm records for its latest
+          #     version (gitHead): the clone's HEAD, or a commit fetched by
+          #     SHA that `git diff` finds no change against. Its tests and its
+          #     lockfile do not count, since neither is in the package, so a
+          #     commit to them, or outside ts/ (a handover page, a Go fix),
+          #     does not force a build;
+          #   - it declares no package this run builds from source, in any of
+          #     dependencies, peerDependencies and optionalDependencies (the
+          #     runtime set ADR-24 reads) or devDependencies (the build's), so
+          #     it is never left compiled against an engine other than the one
+          #     under test (in parser's own run every dependent declares
+          #     parser, so all of them build, as its smoke test needs);
+          #   - the repo under test does not read its build by path (debug's
+          #     tests load ../abnf/ts/dist/abnf.js, which only a build here
+          #     writes).
+          #
+          # The repo under test always builds, and so does anything this
+          # cannot establish (no network, no gitHead, a fetch that fails).
+          # skip-released: false builds every dependency, as before.
+          # Measured on transduce's 18 dependencies, all of them released
+          # (2026-10-08): on windows this step took 113 s building all 19
+          # packages, against 28 s building transduce alone. The registry
+          # checks cost about a second per dependency on windows and half that
+          # on ubuntu.
+          from_registry() {
+            local dep=$1 name gh
+            [ "$SKIP_RELEASED" = "true" ] && [ "$dep" != "$SELF" ] || return 1
+            name=$(pkg_name "$dep") || return 1
+            gh=$(npm view "$name" gitHead 2>/dev/null) || return 1
+            [ -n "$gh" ] || return 1
+            if [ "$gh" != "$(git -C "$ROOT/$dep" rev-parse HEAD)" ]; then
+              git -C "$ROOT/$dep" fetch -q --depth 1 origin "$gh" 2>/dev/null || return 1
+              git -C "$ROOT/$dep" diff --quiet "$gh" HEAD -- ts \
+                ':(exclude)ts/test' ':(exclude)ts/package-lock.json' || return 1
+            fi
+            if [ -n "$BUILT_NAMES" ] && (cd "$ROOT/$dep/ts" && node -e '
+                const p = require("./package.json")
+                const all = { ...p.dependencies, ...p.peerDependencies, ...p.optionalDependencies, ...p.devDependencies }
+                process.exit(process.argv.slice(1).some((n) => n in all) ? 0 : 1)
+              ' $BUILT_NAMES); then
+              return 1
+            fi
+            if grep -rqE "['\"]$dep['\"][[:space:]]*,[[:space:]]*['\"]ts['\"][[:space:]]*,[[:space:]]*['\"]dist|/$dep/ts/dist" \
+                 "$ROOT/$SELF/ts" --include='*.js' --include='*.cjs' --include='*.mjs' --include='*.ts' \
+                 --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=dist-test 2>/dev/null; then
+              return 1
+            fi
+            echo "registry: $name (ts/ unchanged since its latest release, $gh)"
+          }
+
+          BUILT=""; BUILT_NAMES=""; REGISTRY=""
+          for pkg in $ORDER; do
+            if from_registry "$pkg"; then
+              REGISTRY="$REGISTRY $pkg"
+            else
+              BUILT="$BUILT $pkg"
+              BUILT_NAMES="$BUILT_NAMES $(pkg_name "$pkg")"
+            fi
+          done
+          echo "from source:$BUILT"
+          echo "from the registry:${REGISTRY:- none}"
+
+          # Point each @tabnas/* dependency built here at its sibling
+          # checkout, replacing the published copy `npm i` installs.
           #
           # Without this the clones are dead work. Every package declares its
           # siblings as "*", so npm resolves them from the registry and the
@@ -102,24 +200,17 @@ jobs:
           # change can be validated before it is released. It is invisible in
           # the log too: a repo's version is not bumped until release, so the
           # registry copy and the source copy report the SAME version while
-          # differing in code.
+          # differing in code. A dependency taken from the registry above is
+          # left as npm installed it: that copy is what a build would make.
           #
           # The go job below already does the equivalent, via `go work use`
-          # over the cloned modules. This is the missing TypeScript half.
+          # over the cloned modules. This is the TypeScript half.
           link_siblings() {
             pkgdir="$1"
-            for dep in ${{ inputs.deps }}; do
-              [ -f "$ROOT/$dep/ts/package.json" ] || continue
-              # Never link a package into its own node_modules. A dep also
-              # appears in ORDER, so without this parser links parser and the
-              # copy fallback dies with "cannot copy a directory into itself"
-              # (on unix ln -s quietly made a self-referential link instead).
+            for dep in $BUILT; do
+              # Never link a package into its own node_modules.
               [ "$ROOT/$dep/ts" = "$pkgdir" ] && continue
-              # Read the name with a RELATIVE require: on the windows runner
-              # $ROOT is an MSYS path (/d/a/repo/repo) which node cannot
-              # resolve, and an absolute path here fails with
-              # "Cannot find module".
-              name=$(cd "$ROOT/$dep/ts" && node -p "require('./package.json').name")
+              name=$(pkg_name "$dep")
               [ -n "$name" ] || continue
               target="$pkgdir/node_modules/$name"
               # Only substitute what npm actually installed; do not invent
@@ -127,36 +218,41 @@ jobs:
               { [ -e "$target" ] || [ -L "$target" ]; } || continue
               rm -rf "$target"
               mkdir -p "$(dirname "$target")"
-              # Symlink where the platform allows it. On windows, unprivileged
-              # symlink creation may fail or produce something node will not
-              # follow, so fall back to a copy — the dependency has already
-              # been built by this point in ORDER, so the copy carries dist/.
-              #
-              # Either outcome builds correctly, so this is not a failure. But
-              # SAY WHICH ONE HAPPENED: under MSYS `ln -s` copies the tree and
-              # still exits 0, so a successful ln does not mean a link exists,
-              # and the log used to claim "linked" over an ordinary directory.
-              # Anything asking "is this the sibling?" cannot answer it with
-              # lstat on windows — see the enginepin guard in json/support,
-              # which read the copy as a registry install and failed on a
-              # version skew that was never real.
-              if ! ln -s "$ROOT/$dep/ts" "$target" 2>/dev/null \
-                 || [ ! -f "$target/package.json" ]; then
-                rm -rf "$target"
-                cp -R "$ROOT/$dep/ts" "$target"
-                echo "copied $name <- $dep/ts (symlink unavailable)"
-              elif [ -L "$target" ]; then
-                echo "linked $name -> $dep/ts (was the published copy)"
+              # A real link on every platform. On windows, git-bash's plain
+              # `ln -s` DEEP-COPIES the tree and exits 0, node_modules and
+              # all, and each sibling's node_modules already holds copies of
+              # its own siblings, so the copies compound down the order:
+              # measured on alchemy (18 dependencies), 105 of them took 1,075 s
+              # of a 1,224 s windows job, against 12 s of symlinks on ubuntu.
+              # With real links, transduce's 104 took about 14 s on windows,
+              # and its build step fell from 884 s to 113 s.
+              # `winsymlinks:nativestrict` makes `ln -s` create an NTFS
+              # symlink or fail; a directory junction needs no privilege; a
+              # copy is the last resort, and the log says which happened.
+              # Anything asking "is this the sibling?" (the enginepin guards in
+              # json and support) now sees a link on windows as elsewhere.
+              if MSYS=winsymlinks:nativestrict ln -s "$ROOT/$dep/ts" "$target" 2>/dev/null \
+                 && [ -f "$target/package.json" ]; then
+                echo "linked $name -> $dep/ts (symlink)"
               else
-                echo "copied $name <- $dep/ts (ln -s produced a copy)"
+                [ -L "$target" ] && rm -f "$target"
+                if [ "$RUNNER_OS" = "Windows" ] \
+                   && MSYS_NO_PATHCONV=1 cmd /c mklink /J "$(cygpath -w "$target")" "$(cygpath -w "$ROOT/$dep/ts")" >/dev/null 2>&1 \
+                   && [ -f "$target/package.json" ]; then
+                  echo "linked $name -> $dep/ts (junction)"
+                else
+                  cp -R "$ROOT/$dep/ts" "$target"
+                  echo "copied $name <- $dep/ts (no link could be made)"
+                fi
               fi
             done
           }
 
-          for pkg in $ORDER; do
+          for pkg in $BUILT; do
             ( cd "$pkg/ts" && npm i )
             # Link BEFORE building, so each package compiles against sibling
-            # source rather than the registry.
+            # source rather than the registry. A link to a dependency later
+            # in the order is resolved when it is read, after that build.
             link_siblings "$ROOT/$pkg/ts"
             ( cd "$pkg/ts" && npm run build --if-present )
           done
@@ -184,8 +280,25 @@ jobs:
         shell: bash
         run: |
           set -e
+          # Three tries a sibling, 15 s and then 30 s apart. A runner's
+          # connection to github.com drops now and then, and one dropped
+          # clone used to fail the whole job before any test ran:
+          # tabnas/css#69's macOS job did, twice, with "Failed to connect to
+          # github.com port 443 after 75004 ms". A repo that does not exist
+          # fails all three, and the job with it.
           for dep in ${{ inputs.deps }}; do
-            git clone --depth 1 "https://github.com/tabnas/$dep.git" "$dep"
+            for try in 1 2 3; do
+              if git clone --depth 1 "https://github.com/tabnas/$dep.git" "$dep"; then
+                break
+              fi
+              rm -rf "$dep"
+              if [ "$try" = 3 ]; then
+                echo "::error::could not clone tabnas/$dep in 3 tries"
+                exit 1
+              fi
+              echo "clone of tabnas/$dep failed (try $try of 3); trying again in $((try * 15)) s"
+              sleep $((try * 15))
+            done
           done
       # Mirror admin/scripts/link.sh: vendor symlinks for ../vendor/ replaces,
       # then a go.work over every module EXCEPT those vendor-replaced ones.
