@@ -27,7 +27,10 @@ permissions:
 
 jobs:
   attach:
-    runs-on: macos-14
+    runs-on: macos-latest
+    env:
+      # The oldest macOS the library loads on; clib-release.yml says why.
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -37,6 +40,13 @@ jobs:
           go-version-file: go/go.mod
       - name: build darwin host target
         run: cd go/clib && ./build.sh
+      - name: check the macOS floor the library declares
+        run: |
+          for f in go/clib/dist/*-darwin-*.dylib; do
+            minos=$(otool -l "$f" | awk '$1 == "cmd" { b = ($2 == "LC_BUILD_VERSION") } b && $1 == "minos" && v == "" { v = $2 } END { print v }')
+            echo "$f: minos ${minos:-none}"
+            [ "$minos" = "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "::error::$f declares minos ${minos:-(none)}; the build asked for $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
+          done
       - name: patch manifest and upload
         env:
           GH_TOKEN: ${{ github.token }}

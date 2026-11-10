@@ -6,7 +6,15 @@
 # TWO LANES (ADR-12 clause 5; strategy note §8):
 #   portable  Linux + zig cross-compiles linux/amd64, linux/arm64,
 #             windows/amd64. GATES the artifact release.
-#   darwin    macos-14, builds the host arch only (darwin/arm64).
+#   darwin    macos-latest (Apple silicon), builds the host arch only
+#             (darwin/arm64), for macOS 14 and later. Unpinned, that floor
+#             would be the runner image's own version: every artifact up
+#             to 2026-11-02 came from macos-14 and declares 14.0, so the
+#             job pins MACOSX_DEPLOYMENT_TARGET and checks the library
+#             declares it. GitHub retired macos-14 on that date, and a job
+#             on a retired label is cancelled before it starts, which
+#             also skips the caller's publish job and leaves its Release
+#             a draft.
 #             Best-effort twice over: an org/repo variable switches the
 #             lane off without editing workflows, and continue-on-error
 #             means a red Mac never reds the release. darwin/amd64 is
@@ -60,9 +68,12 @@ jobs:
           if-no-files-found: error
 
   darwin:
-    runs-on: macos-14
+    runs-on: macos-latest
     if: ${{ vars.TABNAS_DARWIN != 'off' }}
     continue-on-error: true
+    env:
+      # The oldest macOS the library loads on (see the header).
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -72,6 +83,13 @@ jobs:
           go-version-file: go/go.mod
       - name: build darwin host target
         run: cd go/clib && ./build.sh
+      - name: check the macOS floor the library declares
+        run: |
+          for f in go/clib/dist/*-darwin-*.dylib; do
+            minos=$(otool -l "$f" | awk '$1 == "cmd" { b = ($2 == "LC_BUILD_VERSION") } b && $1 == "minos" && v == "" { v = $2 } END { print v }')
+            echo "$f: minos ${minos:-none}"
+            [ "$minos" = "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "::error::$f declares minos ${minos:-(none)}; the build asked for $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: clib-darwin
